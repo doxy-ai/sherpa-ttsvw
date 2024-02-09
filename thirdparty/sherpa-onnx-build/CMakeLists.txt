@@ -1,0 +1,12 @@
+cmake_minimum_required(VERSION 3.20)
+project(Sherpa-Onnx-Build CXX C)
+
+set(CMAKE_CXX_STANDARD 14)
+
+message("${CMAKE_CURRENT_SOURCE_DIR}")
+set(CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/sherpa-onnx/cmake)
+set(SHERPA_ONNX_ENABLE_WEBSOCKET OFF CACHE BOOL "Whether to build webscoket server/client")
+set(SHERPA_ONNX_ENABLE_BINARY OFF CACHE BOOL "Whether to build binaries")
+set(SHERPA_ONNX_ENABLE_PORTAUDIO OFF CACHE BOOL "Whether to build with portaudio")
+add_subdirectory(sherpa-onnx)
+target_include_directories(sherpa-onnx-core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/sherpa-onnx)

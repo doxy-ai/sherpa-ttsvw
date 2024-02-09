@@ -2,3 +2,7 @@
 	path = thirdparty/crow-build/Crow
 	url = https://github.com/CrowCpp/Crow.git
 	shallow = true
+[submodule "thirdparty/sherpa-onnx-build/sherpa-onnx"]
+	path = thirdparty/sherpa-onnx-build/sherpa-onnx
+	url = https://github.com/k2-fsa/sherpa-onnx.git
+	shallow = true
