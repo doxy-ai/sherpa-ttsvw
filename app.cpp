@@ -2,6 +2,7 @@
 #include "crow.h"
 #include "sherpa-onnx/c-api/c-api.h"
 #include "argparse/argparse.hpp"
+#include "base64.h"
 
 enum Provider {
 	cpu,
@@ -32,6 +33,7 @@ struct Arguments : public argparse::Args {
 	std::optional<std::string>& tts_rule_fsts = kwarg("tts-rule-fsts", "It not empty, it contains a list of rule FST filenames. Multiple filenames are separated by a comma and they are applied from left to right. An example value: ule1.fst,rule2,fst,rule3.fst");
 	int32_t& max_sentences = kwarg("max-sentences,max-num-sentences", "Maximum number of sentences that we process at a time. This is to avoid OOM for very long input text. If you set it to -1, then we process all sentences in a single batch.").set_default(2);
 
+	bool& base64_encode = flag("b,base-64,tts-voice-wizard", "Should the generated audio be base64 encoded? This is needed by tts-voice-wizard!");
 	std::string& listen_address = kwarg("listen-address", "IP address to bind to").set_default("0.0.0.0");
 	uint16_t& port = kwarg("port", "Port to bind to").set_default(8124);
 
@@ -64,8 +66,10 @@ struct Arguments : public argparse::Args {
 };
 
 struct GeneratedAudio: public SherpaOnnxGeneratedAudio, public crow::returnable {
-	GeneratedAudio() : crow::returnable("audio/wav") {}
-	GeneratedAudio(const SherpaOnnxGeneratedAudio* audio) : SherpaOnnxGeneratedAudio(*audio), crow::returnable("audio/wav") {}
+	bool base64_encode = false;
+
+	GeneratedAudio(bool base64_encode = false) : base64_encode(base64_encode), crow::returnable(base64_encode ? "text/plain" : "audio/wav") {}
+	GeneratedAudio(const SherpaOnnxGeneratedAudio* audio, bool base64_encode = false) : base64_encode(base64_encode), SherpaOnnxGeneratedAudio(*audio), crow::returnable(base64_encode ? "text/plain" : "audio/wav") {}
 	
 	// from: thirdparty/sherpa-onnx-build/sherpa-onnx/sherpa-onnx/csrc/wave-writer.cc
 	struct WaveHeader {
@@ -129,9 +133,29 @@ struct GeneratedAudio: public SherpaOnnxGeneratedAudio, public crow::returnable 
 		std::ostringstream wavData;
 		if(!write_wav(wavData)) 
 			return "Failure!";
+		if(base64_encode)
+			return macaron::Base64::Encode(wavData.str());
 		return wavData.str();
 	}
 };
+
+// From: https://stackoverflow.com/questions/154536/encode-decode-urls-in-c
+std::string url_decode(const std::string& SRC) {
+    std::string ret;
+    char ch;
+    int i, ii;
+    for (i=0; i<SRC.length(); i++) {
+        if (SRC[i]=='%') {
+            sscanf(SRC.substr(i+1,2).c_str(), "%x", &ii);
+            ch=static_cast<char>(ii);
+            ret+=ch;
+            i=i+2;
+        } else {
+            ret+=SRC[i];
+        }
+    }
+    return (ret);
+}
 
 int main(int argc, const char *const *argv) {
 	auto args = argparse::parse<Arguments>(argc, argv);
@@ -162,17 +186,27 @@ int main(int argc, const char *const *argv) {
 		.max_num_sentences = args.max_sentences
 	};
 
+	bool base64_encode = args.base64_encode;
 	int32_t sid = 0;
 	SherpaOnnxOfflineTts *tts = SherpaOnnxCreateOfflineTts(&config);
 
-	CROW_ROUTE(app, "/synthesize")([&tts, &sid](const crow::request& req) -> crow::response {
+	CROW_ROUTE(app, "/synthesize/")([&tts, &sid, base64_encode](const crow::request& req) -> crow::response {
+		std::string _text;
 		auto text = req.url_params.get("text");
+		if(!text) {
+			// std::cout << req.raw_url << std::endl;
+			// std::cout << qs_k2v(req.url_params.keys()[0]) << std::endl;
+			_text = url_decode(req.raw_url.substr(13, req.raw_url.size()));
+			std::cout << _text << std::endl;
+			text = (char*)_text.c_str();
+		}
 		if(!text) return {400, "Please provide text to generate audio for ex: " + req.url + "?text=TextHere!"};
+		std::cout << "Generating: " << text << std::endl;
 
 		// Generate audio
 		const SherpaOnnxGeneratedAudio *audio = SherpaOnnxOfflineTtsGenerate(tts, text, sid, 1.0);
 		// Convert the generated audio into an HTTP response
-		crow::response response = GeneratedAudio(audio);
+		crow::response response = GeneratedAudio(audio, base64_encode);
 		// Free the original audio data
 		SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio); 
 		return response;		
