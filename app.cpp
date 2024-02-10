@@ -1,6 +1,67 @@
 #undef ASIO_NO_DEPRECATED
 #include "crow.h"
 #include "sherpa-onnx/c-api/c-api.h"
+#include "argparse/argparse.hpp"
+
+enum Provider {
+	cpu,
+	cuda,
+	coreml,
+};
+
+std::string to_string(Provider p) {
+	switch(p) {
+		case cpu: return "cpu";
+		case cuda: return "cuda";
+		case coreml: return "coreml";
+		default: return "<invalid>";
+	}
+}
+
+struct Arguments : public argparse::Args {
+    std::string& vits_model = kwarg("m,vits-model", "Path to VITS model");
+    std::optional<std::string>& vits_lexicon = kwarg("l,vits-lexicon", "Path to lexicon.txt for VITS models");
+    std::string& vits_tokens = kwarg("t,vits-tokens", "Path to tokens.txt for VITS models");
+	std::optional<std::string>& vits_data_dir = kwarg("d,vits-data-dir", "Path to espeak-ng-data. If it is given, --vits-lexicon is ignored");
+	float& vits_noise_scale = kwarg("vits-noise-scale", "noise_scale for VITS models").set_default(.667);
+	float& vits_noise_scale_w = kwarg("vits-noise-scale-w", "noise_scale_w for VITS models").set_default(.8);
+	float& vits_length_scale = kwarg("vits-length-scale", "length_scale for VITS models. Default to 1. You can tune it to change the speech speed. small -> faster; large -> slower. ").set_default(1);
+	int32_t& num_threads = kwarg("j,num-threads", "Number of threads", std::to_string(std::thread::hardware_concurrency())).set_default(1);
+	Provider& provider = kwarg("provider", "Where the generation should be run").set_default(Provider::cpu);
+	uint32_t& speaker_id = kwarg("sid,speaker-id", "Speaker ID. Note it is not used for single-speaker models.").set_default(0);
+	std::optional<std::string>& tts_rule_fsts = kwarg("tts-rule-fsts", "It not empty, it contains a list of rule FST filenames. Multiple filenames are separated by a comma and they are applied from left to right. An example value: ule1.fst,rule2,fst,rule3.fst");
+	int32_t& max_sentences = kwarg("max-sentences,max-num-sentences", "Maximum number of sentences that we process at a time. This is to avoid OOM for very long input text. If you set it to -1, then we process all sentences in a single batch.").set_default(2);
+
+	std::string& listen_address = kwarg("listen-address", "IP address to bind to").set_default("0.0.0.0");
+	uint16_t& port = kwarg("port", "Port to bind to").set_default(8124);
+
+	void welcome() {
+        std::cout << "Offline text-to-speech webserver powered by sherpa-onnx\n"
+			"\n"
+			"You can download a test model from\n"
+			"https://huggingface.co/csukuangfj/vits-ljs\n"
+			"\n"
+			"For instance, you can use:\n"
+			"wget "
+			"https://huggingface.co/csukuangfj/vits-ljs/resolve/main/vits-ljs.onnx\n"
+			"wget "
+			"https://huggingface.co/csukuangfj/vits-ljs/resolve/main/lexicon.txt\n"
+			"wget "
+			"https://huggingface.co/csukuangfj/vits-ljs/resolve/main/tokens.txt\n"
+			"\n"
+			"./app \\\n"
+			"  --vits-model=./vits-ljs.onnx \\\n"
+			"  --vits-lexicon=./lexicon.txt \\\n"
+			"  --vits-tokens=./tokens.txt \\\n"
+			"\n"
+			"Then navigate to\n"
+			R"( http://localhost:8124/synthesize?text=This%20is%20text%20generated%20by%20a%20web%20server%21)"
+			"\n\n"
+			"Please see\n"
+			" https://k2-fsa.github.io/sherpa/onnx/tts/index.html\n"
+			"for details.\n\n" << std::endl;
+    }
+};
 
 struct GeneratedAudio: public SherpaOnnxGeneratedAudio, public crow::returnable {
 	GeneratedAudio() : crow::returnable("audio/wav") {}
@@ -72,16 +133,34 @@ struct GeneratedAudio: public SherpaOnnxGeneratedAudio, public crow::returnable 
 	}
 };
 
-
-
-int main() {
-	// TODO: Add argument parser library to read the nessicary configuration arguments in from the command line!
+int main(int argc, const char *const *argv) {
+	auto args = argparse::parse<Arguments>(argc, argv);
+	if(!args.vits_data_dir && !args.vits_lexicon) {
+		std::cerr << "Argument missing: one of --vits-lexicon (Path to lexicon.txt for VITS models) or --vits-data-dir (Path to espeak-ng-data) required" << std::endl;
+		return 1;
+	}
 
 	crow::SimpleApp app;
 
-	SherpaOnnxOfflineTtsConfig config = {};
-
-	// TODO: Configure
+	auto provider = to_string(args.provider);
+	SherpaOnnxOfflineTtsConfig config = {
+		.model = {
+			.vits = {
+				.model = args.vits_model.c_str(),
+				.lexicon = args.vits_lexicon.has_value() ? args.vits_lexicon->c_str() : nullptr,
+				.tokens = args.vits_tokens.c_str(),
+				.data_dir = args.vits_data_dir.has_value() ? args.vits_data_dir->c_str() : nullptr,
+				.noise_scale = args.vits_noise_scale,
+				.noise_scale_w = args.vits_noise_scale_w,
+				.length_scale = args.vits_length_scale
+			},
+			.num_threads = args.num_threads,
+			.debug = true,
+			.provider = provider.c_str()
+		},
+		.rule_fsts = args.tts_rule_fsts.has_value() ? args.tts_rule_fsts->c_str() : nullptr,
+		.max_num_sentences = args.max_sentences
+	};
 
 	int32_t sid = 0;
 	SherpaOnnxOfflineTts *tts = SherpaOnnxCreateOfflineTts(&config);
@@ -91,21 +170,15 @@ int main() {
 		if(!text) return {400, "Please provide text to generate audio for ex: " + req.url + "?text=TextHere!"};
 
 		// Generate audio
-		const SherpaOnnxGeneratedAudio *audio = SherpaOnnxOfflineTtsGenerate(tts, text, sid++, 1.0);
-		// SherpaOnnxWriteWave(audio->samples, audio->n, audio->sample_rate, filename);
+		const SherpaOnnxGeneratedAudio *audio = SherpaOnnxOfflineTtsGenerate(tts, text, sid, 1.0);
 		// Convert the generated audio into an HTTP response
 		crow::response response = GeneratedAudio(audio);
-
 		// Free the original audio data
 		SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio); 
-
 		return response;		
-		
-		// std::cout << "AUDIO FOR '" << text << "' REQUESTED" << std::endl;
-		// return "No Audio ;(";
 	});
 
-	app.port(8124).run();
+	app.bindaddr(args.listen_address).port(args.port).run();
 
 	SherpaOnnxDestroyOfflineTts(tts);
 }

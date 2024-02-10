@@ -6,3 +6,6 @@
 	path = thirdparty/sherpa-onnx-build/sherpa-onnx
 	url = https://github.com/k2-fsa/sherpa-onnx.git
 	shallow = true
+[submodule "thirdparty/argparse"]
+	path = thirdparty/argparse
+	url = https://github.com/morrisfranken/argparse.git
